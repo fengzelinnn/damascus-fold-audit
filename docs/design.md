@@ -38,7 +38,7 @@
 | D5 | certified seed、epoch deadline、可信接收时间、重放状态的本地实验适配 | 论文需要外部认证上下文；不能用 prover 自报时间/布尔值替代认证 |
 | D6 | 两平台确切 CPU/RAM/VRAM/OS 与最终基准构建 | 等本地预检，不假设；GPU实现需参数确定后进行差分验证 |
 
-用户手动创建并明确确认公开发布到 `fengzelinnn/damascus-fold-audit`。连接器只读核实 owner、public、默认 main、空仓库及元数据中的 push 权限。但首次通过 Contents API 新建 README.md 被拒绝：403 `Resource not accessible by integration`；元数据权限不等于当前连接器具备实际写入能力。远端写入已停止，没有成功远端提交；本阶段保留本地提交与源码包，等待现有连接器授权处理。不得生成凭据、扩权、强推或覆盖用户文件。公开实现可能关联未发表研究，原论文、Drive定位信息、原始日志、服务器配置及旧源码均排除。
+用户手动创建并明确确认公开发布到 `fengzelinnn/damascus-fold-audit`。首次通过 Contents API 新建 README.md 曾被拒绝：403 `Resource not accessible by integration`。用户随后确认现有连接器授权已调整；再次只读核实身份、public、默认 main、空仓库与分支后，获准的一次重试成功。第一阶段源码已正常提交至 [788c0942c613eac75c616847f9856dc53f4690a6](https://github.com/fengzelinnn/damascus-fold-audit/commit/788c0942c613eac75c616847f9856dc53f4690a6)，71 个文件的目录树与本地已测试提交 `fc02477c89350bb5d070e5e5842a817ccc3febdb` 完全一致；没有强推或覆盖用户文件。较早的离线阶段包保留当时 403 的历史状态，本段为恢复发布后的状态更新。公开实现可能关联未发表研究，原论文、Drive定位信息、原始日志、服务器配置及旧源码均排除。
 
 ## A 组图及实验
 
