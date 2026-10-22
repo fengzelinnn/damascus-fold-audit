@@ -1,0 +1,12 @@
+{
+  "frozen_manuscript_sha256": "481a41f1bb3c7dd0f971d6cee87151242910214fda3315887778b48dc9da9bd0",
+  "status": "not_deployable_as_a_complete_protocol",
+  "file_codec": null,
+  "wire_profile": null,
+  "fiat_shamir_suite": null,
+  "certified_context_adapter": null,
+  "approved_security_parameters": null,
+  "candidate_two_child_extractor_adopted": false,
+  "chunking_adopted": false,
+  "formal_collection_authorized": false
+}

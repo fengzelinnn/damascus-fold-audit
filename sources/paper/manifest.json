@@ -1,0 +1,26 @@
+{
+  "frozen_at_utc": "2026-10-22T13:04:21.919446+00:00",
+  "source": "User-designated manuscript folder; locator and Drive revision metadata retained locally, excluded from public release.",
+  "files": [
+    {
+      "name": "main.tex",
+      "size": 151877,
+      "modified_time": "2026-10-22T09:58:51.110Z",
+      "sha256": "481a41f1bb3c7dd0f971d6cee87151242910214fda3315887778b48dc9da9bd0"
+    },
+    {
+      "name": "main.pdf",
+      "size": 2252419,
+      "modified_time": "2026-10-22T09:58:54.053Z",
+      "sha256": "756eb0180220a0c4039e23c6b83277eec16f22f06e44be6532483bb4e7eb69a6"
+    }
+  ],
+  "recheck": {
+    "modified_time_and_size_unchanged": true,
+    "folder_direct_children": 12,
+    "matching_main_tex_files": 1,
+    "matching_main_pdf_files": 1,
+    "latest_scope": "current accessible revisions in the user-designated folder at freeze time",
+    "tex_pdf_check": "same title, protocol equations, integer norm, parity and extraction recurrence observed in PDF text; no reproducible PDF rebuild performed"
+  }
+}

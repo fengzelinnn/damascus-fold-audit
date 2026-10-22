@@ -1,0 +1,11 @@
+{
+  "label": "user-i5-rtx4060ti",
+  "status": "awaiting_local_preflight",
+  "cpu_exact_model": null,
+  "ram_bytes": null,
+  "gpu_exact_model": null,
+  "vram_bytes": null,
+  "os": null,
+  "driver": null,
+  "approved_formal_collection": false
+}
