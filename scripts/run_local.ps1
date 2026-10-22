@@ -8,4 +8,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Preflight failed' }
     py -3.12 -m damascus_a correctness --d 2 --k 2 --cases 4 --backend cpu-reference --output "$DamascusRunDir/correctness"
     if ($LASTEXITCODE -ne 0) { throw 'Correctness checks failed' }
+    py -3.12 -m damascus_a protocol-correctness --correctness-only --epochs 2 --backend cpu-reference --output "$DamascusRunDir/protocol-correctness"
+    if ($LASTEXITCODE -ne 0) { throw 'Full protocol correctness checks failed' }
 } finally { Pop-Location }

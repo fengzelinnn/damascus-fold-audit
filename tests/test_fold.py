@@ -47,6 +47,185 @@ class FoldTests(unittest.TestCase):
                          commitment_oracle(state.witness, state.public.generators,
                                            state.public.parameters.q))
 
+    def require_staged_api(self):
+        for name in ('vector_cross_terms', 'vector_prove', 'polynomial_cross_terms',
+                     'polynomial_prove', 'vector_update', 'parity_validate', 'polynomial_update',
+                     'vector_generators', 'vector_commitment', 'polynomial_generators', 'polynomial_commitment'):
+            self.assertTrue(callable(getattr(self.f, name, None)), f'missing staged API: {name}')
+
+    def test_staged_folds_equal_full_round_and_independent_commitments(self):
+        self.require_staged_api()
+        for d in (1, 2):
+            for seed in range(20):
+                state = self.fixture(d=d, seed=seed, k=1+seed%3)
+                for j in range(d):
+                    x, y = 1+seed%4, 1+(seed+j+1)%4
+                    complete = self.f.round_prove(state, x, y)
+                    L_vec, R_vec = self.f.vector_cross_terms(state)
+                    self.assertEqual((L_vec, R_vec), (complete.record.L_vec, complete.record.R_vec))
+                    vector = self.f.vector_prove(state, x, L_vec, R_vec)
+                    self.assertEqual(vector, complete.vector_state)
+                    self.assertEqual(self.f.vector_prove(state, x), vector)
+                    self.assert_direct_commitment(vector)
+                    vector_public = self.f.vector_update(state.public, L_vec, R_vec, x)
+                    self.assertEqual(vector_public, vector.public)
+                    self.assertEqual(self.f.vector_generators(state.public, x), vector_public.generators)
+                    self.assertEqual(self.f.vector_commitment(state.public, L_vec, R_vec, x), vector_public.commitment)
+                    L_poly, R_poly = self.f.polynomial_cross_terms(vector)
+                    self.assertEqual((L_poly, R_poly), (complete.record.L_poly, complete.record.R_poly))
+                    # This entry point has no y argument, so parity can precede its derivation.
+                    self.assertIsNone(self.f.parity_validate(vector_public, L_poly, R_poly))
+                    next_state = self.f.polynomial_prove(vector, y, L_poly, R_poly)
+                    self.assertEqual(next_state, complete.next_state)
+                    self.assertEqual(self.f.polynomial_prove(vector, y), next_state)
+                    self.assert_direct_commitment(next_state)
+                    self.assertEqual(self.f.polynomial_generators(vector_public, y), next_state.public.generators)
+                    self.assertEqual(self.f.polynomial_commitment(vector_public, L_poly, R_poly, y), next_state.public.commitment)
+                    self.assertEqual(self.f.polynomial_update(vector_public, L_poly, R_poly, y),
+                                     next_state.public)
+                    state = next_state
+
+    def test_staged_provers_reject_inconsistent_or_partial_supplied_terms(self):
+        self.require_staged_api()
+        initial = self.fixture(seed=9)
+        L, R = self.f.vector_cross_terms(initial)
+        unit = initial.public.ring.element((1, 0))
+        wrong_L = (L[0] + unit,) + L[1:]
+        for changes in ((wrong_L, R), (L, None), (None, R), (list(L), R)):
+            with self.subTest(stage='vector', changes=changes), self.assertRaises((TypeError, ValueError)):
+                self.f.vector_prove(initial, 2, *changes)
+        # L += x^2*delta, R -= delta cancels in Ctilde but is not the true pair.
+        cancelling_L = (L[0] + unit.scale(4),) + L[1:]
+        cancelling_R = (R[0] - unit,) + R[1:]
+        self.assertEqual(self.f.vector_commitment(initial.public, cancelling_L, cancelling_R, 2),
+                         self.f.vector_commitment(initial.public, L, R, 2))
+        with self.assertRaises(ValueError):
+            self.f.vector_prove(initial, 2, cancelling_L, cancelling_R)
+        vector = self.f.vector_prove(initial, 2)
+        L, R = self.f.polynomial_cross_terms(vector)
+        unit = L[0].ring.element((1,))
+        wrong_L = (L[0] + unit,) + L[1:]
+        wrong_R = (R[0] - unit,) + R[1:]
+        self.f.parity_validate(vector.public, wrong_L, wrong_R)
+        for changes in ((wrong_L, wrong_R), (L, None), (None, R), (list(L), R)):
+            with self.subTest(stage='polynomial', changes=changes), self.assertRaises((TypeError, ValueError)):
+                self.f.polynomial_prove(vector, 3, *changes)
+
+    def test_staged_witness_bounds_cover_each_single_fold_and_check_opening(self):
+        self.require_staged_api()
+        initial = self.fixture()
+        witness = ((2, 0), (0, 0))
+        commitment = tuple(RingElement(initial.public.ring, poly) for poly in
+            commitment_oracle(witness, initial.public.generators, initial.public.parameters.q))
+        too_large = dataclasses.replace(initial, witness=witness,
+            public=dataclasses.replace(initial.public, commitment=commitment))
+        for function in (self.f.vector_cross_terms, lambda state: self.f.vector_prove(state, 2)):
+            with self.assertRaisesRegex(ValueError, 'bound'):
+                function(too_large)
+        for d, j in ((1, 0), (2, 1)):
+            state = self.fixture(d=d, seed=6)
+            for _ in range(j):
+                state = self.f.round_prove(state, 2, 3).next_state
+            vector = self.f.vector_prove(state, 4)
+            bound = (1+state.public.parameters.T)**(2*j+1)
+            for magnitude in (bound, -bound, bound+1, -bound-1):
+                witness = tuple((magnitude,) + (0,)*(vector.public.ring.n-1)
+                                for _ in vector.witness)
+                commitment = tuple(RingElement(vector.public.ring, poly) for poly in
+                    commitment_oracle(witness, vector.public.generators, vector.public.parameters.q))
+                candidate = dataclasses.replace(vector, witness=witness,
+                    public=dataclasses.replace(vector.public, commitment=commitment))
+                if abs(magnitude) <= bound:
+                    self.f.polynomial_cross_terms(candidate)
+                    self.assert_direct_commitment(self.f.polynomial_prove(candidate, 4))
+                else:
+                    for function in (self.f.polynomial_cross_terms,
+                                     lambda state: self.f.polynomial_prove(state, 3)):
+                        with self.assertRaisesRegex(ValueError, 'bound'):
+                            function(candidate)
+            ring = state.public.ring
+            bad_commitment = (state.public.commitment[0] + ring.element((1,)+(0,)*(ring.n-1)),) + state.public.commitment[1:]
+            inconsistent = dataclasses.replace(state, public=dataclasses.replace(state.public, commitment=bad_commitment))
+            for function in (self.f.vector_cross_terms, lambda state: self.f.vector_prove(state, 2)):
+                with self.assertRaisesRegex(ValueError, 'commitment'):
+                    function(inconsistent)
+            bad_commitment = (vector.public.commitment[0] + ring.element((1,)+(0,)*(ring.n-1)),) + vector.public.commitment[1:]
+            inconsistent = dataclasses.replace(vector, public=dataclasses.replace(vector.public, commitment=bad_commitment))
+            for function in (self.f.polynomial_cross_terms, lambda state: self.f.polynomial_prove(state, 3)):
+                with self.assertRaisesRegex(ValueError, 'commitment'):
+                    function(inconsistent)
+
+    def test_staged_public_rejects_wrong_shapes_rings_and_stage_types(self):
+        self.require_staged_api()
+        initial = self.fixture(seed=4)
+        L, R = self.f.vector_cross_terms(initial)
+        vector = self.f.vector_prove(initial, 2)
+        Lp, Rp = self.f.polynomial_cross_terms(vector)
+        for bad_L in (L[:-1], list(L), Lp, (Ring(19, 2).zero(),)+L[1:]):
+            with self.subTest(bad_L=bad_L), self.assertRaises((TypeError, ValueError)):
+                self.f.vector_update(initial.public, bad_L, R, 2)
+        for bad_L in (Lp[:-1], list(Lp), L, (Ring(19, 1).zero(),)+Lp[1:]):
+            for function in (lambda: self.f.parity_validate(vector.public, bad_L, Rp),
+                             lambda: self.f.polynomial_update(vector.public, bad_L, Rp, 3)):
+                with self.subTest(bad_L=bad_L), self.assertRaises((TypeError, ValueError)):
+                    function()
+        for bad_state in (initial, vector.public, None):
+            with self.assertRaises((TypeError, ValueError)):
+                self.f.vector_update(bad_state, L, R, 2)
+        for bad_state in (initial.public, vector, None):
+            with self.assertRaises((TypeError, ValueError)):
+                self.f.parity_validate(bad_state, Lp, Rp)
+            with self.assertRaises((TypeError, ValueError)):
+                self.f.polynomial_update(bad_state, Lp, Rp, 3)
+        for bad_challenge in (0, 5, True, 2.0):
+            for function in (lambda: self.f.vector_prove(initial, bad_challenge),
+                             lambda: self.f.vector_update(initial.public, L, R, bad_challenge),
+                             lambda: self.f.polynomial_prove(vector, bad_challenge),
+                             lambda: self.f.polynomial_update(vector.public, Lp, Rp, bad_challenge)):
+                with self.assertRaises((TypeError, ValueError)):
+                    function()
+        terminal = self.f.polynomial_prove(vector, 3)
+        for function in (self.f.vector_cross_terms,
+                         lambda state: self.f.vector_prove(state, 2)):
+            with self.assertRaises(ValueError):
+                function(terminal)
+        with self.assertRaises(ValueError):
+            self.f.vector_update(terminal.public, L, R, 2)
+
+    def test_staged_timing_helpers_validate_standalone_inputs(self):
+        self.require_staged_api()
+        initial = self.fixture(seed=17)
+        L, R = self.f.vector_cross_terms(initial)
+        vector = self.f.vector_prove(initial, 2)
+        Lp, Rp = self.f.polynomial_cross_terms(vector)
+        calls = (lambda: self.f.vector_generators(vector.public, 2),
+                 lambda: self.f.vector_generators(initial.public, True),
+                 lambda: self.f.vector_commitment(initial.public, L[:-1], R, 2),
+                 lambda: self.f.vector_commitment(initial.public, L, R, 0),
+                 lambda: self.f.polynomial_generators(initial.public, 3),
+                 lambda: self.f.polynomial_generators(vector.public, 5),
+                 lambda: self.f.polynomial_commitment(vector.public, Lp, list(Rp), 3),
+                 lambda: self.f.polynomial_commitment(vector.public, Lp, Rp, False),
+                 lambda: self.f.vector_cross_terms(vector),
+                 lambda: self.f.vector_prove(vector, 2),
+                 lambda: self.f.polynomial_cross_terms(initial),
+                 lambda: self.f.polynomial_prove(initial, 3))
+        for call in calls:
+            with self.assertRaises((TypeError, ValueError)):
+                call()
+
+    def test_staged_parity_rejects_before_polynomial_challenge_is_needed(self):
+        self.require_staged_api()
+        vector = self.f.vector_prove(self.fixture(seed=12), 2)
+        L, R = self.f.polynomial_cross_terms(vector)
+        changed = (L[0] + L[0].ring.element((1,)),) + L[1:]
+        with self.assertRaisesRegex(ValueError, 'parity'):
+            self.f.parity_validate(vector.public, changed, R)
+        with self.assertRaisesRegex(ValueError, 'parity'):
+            self.f.polynomial_update(vector.public, changed, R, None)
+        with self.assertRaisesRegex(ValueError, 'parity'):
+            self.f.polynomial_commitment(vector.public, changed, R, None)
+
     def test_random_chains_match_independent_recomputation_at_both_stages(self):
         for d in (1, 2):
             for seed in range(60):

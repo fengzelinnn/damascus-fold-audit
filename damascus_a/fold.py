@@ -1,8 +1,9 @@
 """Exact integer-lift folds and public algebra replay from the frozen paper.
 
-Challenges are explicit test inputs. This is NOT authenticated Damascus Verify:
-there is no file codec, Fiat--Shamir suite, certified context, deadline, replay
-registry, or claim that the arithmetic configuration is cryptographically secure.
+Challenges are supplied by the caller, either as test inputs or by the separate
+protocol layer. These arithmetic stages do not implement authenticated Damascus
+Verify, a file codec, Fiat--Shamir suite, certified context, deadline, or replay
+registry, and do not establish that any arithmetic configuration is secure.
 """
 
 from dataclasses import dataclass
@@ -170,15 +171,16 @@ def _split(module: Module) -> tuple[Module, Module]:
     return tuple(pair[0] for pair in parts), tuple(pair[1] for pair in parts)
 
 
-def _challenge(state: PublicState, value: int) -> int:
+def _challenge(state: PublicState | VectorPublicState, value: int) -> int:
     require_integer(value, 'challenge')
     if not 1 <= value <= state.parameters.T:
         raise ValueError('challenge must lie in 1..T')
     return state.ring.inverse_scalar(value)
 
 
-def _within_honest_bound(value: int, parameters: FoldParameters, level: int) -> bool:
-    """Compare |value| <= (1+T)**(2*level) without building a huge power.
+def _within_honest_bound(value: int, parameters: FoldParameters, level: int,
+                         *, vector_stage: bool = False) -> bool:
+    """Compare the exact full-round or intermediate integer norm bound.
 
     Since 2**(b-1) <= base < 2**b, bit bounds decide distant cases.
     In the remaining case the power has at most roughly twice the bit length
@@ -187,7 +189,7 @@ def _within_honest_bound(value: int, parameters: FoldParameters, level: int) -> 
     magnitude = abs(value)
     if magnitude <= 1:
         return True
-    exponent = 2 * level
+    exponent = 2 * level + int(vector_stage)
     if exponent == 0:
         return False
     base = 1 + parameters.T
@@ -202,28 +204,149 @@ def _within_honest_bound(value: int, parameters: FoldParameters, level: int) -> 
 def _check_round_state(state: PublicState) -> None:
     if not isinstance(state, PublicState):
         raise TypeError('state must be a PublicState')
+    PublicState.__post_init__(state)
     if state.level == state.parameters.d:
         raise ValueError('cannot fold the terminal state')
 
 
-def _vector_public(state: PublicState, L: Module, R: Module, x: int,
-                   inverse_x: int) -> VectorPublicState:
+def _check_vector_state(state: VectorPublicState) -> None:
+    if not isinstance(state, VectorPublicState):
+        raise TypeError('state must be a VectorPublicState')
+    VectorPublicState.__post_init__(state)
+
+
+def _check_prover_state(state: WitnessState | VectorWitnessState, *, vector_stage: bool) -> None:
+    expected_type = VectorWitnessState if vector_stage else WitnessState
+    if not isinstance(state, expected_type):
+        raise TypeError(f'state must be a {expected_type.__name__}')
+    public = state.public
+    if vector_stage:
+        _check_vector_state(public)
+    else:
+        _check_round_state(public)
+    validate_witness(state.witness, len(public.generators), public.ring.n)
+    magnitude = max(abs(value) for poly in state.witness for value in poly)
+    if not _within_honest_bound(magnitude, public.parameters, public.level,
+                                vector_stage=vector_stage):
+        raise ValueError('integer witness exceeds the honest bound for its stage')
+    if module_inner(state.witness, public.generators) != public.commitment:
+        raise ValueError('witness does not open the supplied commitment')
+
+
+def _select_cross_terms(expected: tuple[Module, Module], L: Module | None,
+                        R: Module | None, ring: Ring, k: int) -> tuple[Module, Module]:
+    if L is None and R is None:
+        return expected
+    if L is None or R is None:
+        raise ValueError('both cross terms must be supplied together')
+    validate_module(L, ring, k, 'L')
+    validate_module(R, ring, k, 'R')
+    if (L, R) != expected:
+        raise ValueError('supplied cross terms do not match the witness and generators')
+    return L, R
+
+
+def vector_cross_terms(state: WitnessState) -> tuple[Module, Module]:
+    """Validate the witness state and compute terms to bind before deriving x."""
+    _check_prover_state(state, vector_stage=False)
+    half = len(state.witness) // 2
+    return (module_inner(state.witness[:half], state.public.generators[half:]),
+            module_inner(state.witness[half:], state.public.generators[:half]))
+
+
+def vector_generators(state: PublicState, x: int) -> Generators:
+    """Replay only vector generator arithmetic, including typed input checks."""
+    _check_round_state(state)
+    inverse_x = _challenge(state, x)
     half = len(state.generators) // 2
-    generators = tuple(_add(left, _scale(right, inverse_x))
-                       for left, right in zip(state.generators[:half], state.generators[half:]))
-    commitment = _add(_add(state.commitment, _scale(L, inverse_x)), _scale(R, x))
+    return tuple(_add(left, _scale(right, inverse_x))
+                 for left, right in zip(state.generators[:half], state.generators[half:]))
+
+
+def vector_commitment(state: PublicState, L: Module, R: Module, x: int) -> Module:
+    """Replay only vector commitment arithmetic; no witness authenticity claim."""
+    _check_round_state(state)
+    validate_module(L, state.ring, state.parameters.k, 'L_vec')
+    validate_module(R, state.ring, state.parameters.k, 'R_vec')
+    inverse_x = _challenge(state, x)
+    return _add(_add(state.commitment, _scale(L, inverse_x)), _scale(R, x))
+
+
+def vector_update(state: PublicState, L: Module, R: Module, x: int) -> VectorPublicState:
+    """Public vector fold from well-typed terms and an explicit challenge."""
+    commitment = vector_commitment(state, L, R, x)
+    generators = vector_generators(state, x)
     return VectorPublicState(state.parameters, state.level, generators, commitment)
 
 
-def _polynomial_public(state: VectorPublicState, L: Module, R: Module, y: int,
-                       inverse_y: int) -> PublicState:
-    even, odd = _split(state.commitment)
+def vector_prove(state: WitnessState, x: int, L: Module | None = None,
+                 R: Module | None = None) -> VectorWitnessState:
+    """Fold an integer witness; optional prebound terms must match recomputation."""
+    terms = vector_cross_terms(state)
+    L, R = _select_cross_terms(terms, L, R, state.public.ring, state.public.parameters.k)
+    public = vector_update(state.public, L, R, x)
+    half = len(state.witness) // 2
+    witness = tuple(tuple(a + x*b for a, b in zip(left, right))
+                    for left, right in zip(state.witness[:half], state.witness[half:]))
+    return VectorWitnessState(public, witness)
+
+
+def parity_validate(state: VectorPublicState, L: Module, R: Module) -> None:
+    """Validate polynomial shapes and odd(Ctilde)=L+R before deriving y."""
+    _check_vector_state(state)
+    child = Ring(state.parameters.q, state.ring.n // 2)
+    validate_module(L, child, state.parameters.k, 'L_poly')
+    validate_module(R, child, state.parameters.k, 'R_poly')
+    _, odd = _split(state.commitment)
     if odd != _add(L, R):
         raise ValueError('polynomial parity check failed: odd(Ctilde) != L_poly + R_poly')
-    generators = tuple(_add(ge, _scale(_variable(go), inverse_y))
-                       for ge, go in (_split(generator) for generator in state.generators))
-    commitment = _add(_add(even, _scale(_variable(L), inverse_y)), _scale(R, y))
+
+
+def polynomial_cross_terms(state: VectorWitnessState) -> tuple[Module, Module]:
+    """Compute original polynomial terms with no Y in L; check parity before y."""
+    _check_prover_state(state, vector_stage=True)
+    fe = tuple(polynomial[::2] for polynomial in state.witness)
+    fo = tuple(polynomial[1::2] for polynomial in state.witness)
+    parts = tuple(_split(generator) for generator in state.public.generators)
+    ge, go = tuple(pair[0] for pair in parts), tuple(pair[1] for pair in parts)
+    L, R = module_inner(fe, go), module_inner(fo, ge)
+    parity_validate(state.public, L, R)
+    return L, R
+
+
+def polynomial_generators(state: VectorPublicState, y: int) -> Generators:
+    """Replay generator arithmetic after the caller's pre-challenge parity check."""
+    _check_vector_state(state)
+    inverse_y = _challenge(state, y)
+    return tuple(_add(ge, _scale(_variable(go), inverse_y))
+                 for ge, go in (_split(generator) for generator in state.generators))
+
+
+def polynomial_commitment(state: VectorPublicState, L: Module, R: Module, y: int) -> Module:
+    """Check parity first, then replay only polynomial commitment arithmetic."""
+    parity_validate(state, L, R)
+    inverse_y = _challenge(state, y)
+    even, _ = _split(state.commitment)
+    return _add(_add(even, _scale(_variable(L), inverse_y)), _scale(R, y))
+
+
+def polynomial_update(state: VectorPublicState, L: Module, R: Module, y: int) -> PublicState:
+    """Public polynomial fold; standalone use also rechecks parity before y."""
+    commitment = polynomial_commitment(state, L, R, y)
+    generators = polynomial_generators(state, y)
     return PublicState(state.parameters, state.level + 1, generators, commitment)
+
+
+def polynomial_prove(state: VectorWitnessState, y: int, L: Module | None = None,
+                     R: Module | None = None) -> WitnessState:
+    """Finish the integer fold; supplied prebound terms must equal recomputation."""
+    terms = polynomial_cross_terms(state)
+    child = Ring(state.public.parameters.q, state.public.ring.n // 2)
+    L, R = _select_cross_terms(terms, L, R, child, state.public.parameters.k)
+    public = polynomial_update(state.public, L, R, y)
+    witness = tuple(tuple(a + y*b for a, b in zip(polynomial[::2], polynomial[1::2]))
+                    for polynomial in state.witness)
+    return WitnessState(public, witness)
 
 
 def initialize(parameters: FoldParameters, witness: Witness, generators: Generators) -> WitnessState:
@@ -237,52 +360,27 @@ def initialize(parameters: FoldParameters, witness: Witness, generators: Generat
 
 
 def round_prove(state: WitnessState, x: int, y: int) -> RoundResult:
-    """Compute one source-equation round for caller-supplied test challenges."""
-    if not isinstance(state, WitnessState):
-        raise TypeError('state must be a WitnessState')
-    public = state.public
-    _check_round_state(public)
-    inverse_x, inverse_y = _challenge(public, x), _challenge(public, y)
-    magnitude = max(abs(value) for poly in state.witness for value in poly)
-    if not _within_honest_bound(magnitude, public.parameters, public.level):
-        raise ValueError('integer witness exceeds the honest bound for its level')
-    if module_inner(state.witness, public.generators) != public.commitment:
-        raise ValueError('witness does not open the supplied commitment')
-    half = len(state.witness) // 2
-    left, right = state.witness[:half], state.witness[half:]
-    L_vec = module_inner(left, public.generators[half:])
-    R_vec = module_inner(right, public.generators[:half])
-    vector_witness = tuple(tuple(a + x*b for a, b in zip(a_poly, b_poly))
-                           for a_poly, b_poly in zip(left, right))
-    vector_public = _vector_public(public, L_vec, R_vec, x, inverse_x)
-    fe = tuple(polynomial[::2] for polynomial in vector_witness)
-    fo = tuple(polynomial[1::2] for polynomial in vector_witness)
-    parts = tuple(_split(generator) for generator in vector_public.generators)
-    ge, go = tuple(pair[0] for pair in parts), tuple(pair[1] for pair in parts)
-    # Original source definitions: there is NO Y factor inside L_poly.
-    L_poly, R_poly = module_inner(fe, go), module_inner(fo, ge)
-    record = RoundRecord(L_vec, R_vec, L_poly, R_poly)
-    next_public = _polynomial_public(vector_public, L_poly, R_poly, y, inverse_y)
-    next_witness = tuple(tuple(a + y*b for a, b in zip(a_poly, b_poly))
-                         for a_poly, b_poly in zip(fe, fo))
-    return RoundResult(record, VectorWitnessState(vector_public, vector_witness),
-                       WitnessState(next_public, next_witness))
+    """Compatibility round API, composed from the validated staged prover."""
+    L_vec, R_vec = vector_cross_terms(state)
+    vector = vector_prove(state, x, L_vec, R_vec)
+    L_poly, R_poly = polynomial_cross_terms(vector)
+    next_state = polynomial_prove(vector, y, L_poly, R_poly)
+    return RoundResult(RoundRecord(L_vec, R_vec, L_poly, R_poly), vector, next_state)
 
 
 def round_update(state: PublicState, record: RoundRecord, x: int, y: int) -> PublicRoundResult:
-    """Replay one public algebra round, including generator folding and parity."""
+    """Compatibility public round API, composed from the validated stages."""
     _check_round_state(state)
     if not isinstance(record, RoundRecord):
         raise TypeError('record must be a RoundRecord')
-    inverse_x, inverse_y = _challenge(state, x), _challenge(state, y)
     child = Ring(state.parameters.q, state.ring.n // 2)
     validate_module(record.L_vec, state.ring, state.parameters.k, 'L_vec')
     validate_module(record.R_vec, state.ring, state.parameters.k, 'R_vec')
     validate_module(record.L_poly, child, state.parameters.k, 'L_poly')
     validate_module(record.R_poly, child, state.parameters.k, 'R_poly')
-    vector_public = _vector_public(state, record.L_vec, record.R_vec, x, inverse_x)
-    next_public = _polynomial_public(vector_public, record.L_poly, record.R_poly, y, inverse_y)
-    return PublicRoundResult(vector_public, next_public)
+    vector = vector_update(state, record.L_vec, record.R_vec, x)
+    next_state = polynomial_update(vector, record.L_poly, record.R_poly, y)
+    return PublicRoundResult(vector, next_state)
 
 
 def replay(initial: PublicState, records: tuple[RoundRecord, ...],

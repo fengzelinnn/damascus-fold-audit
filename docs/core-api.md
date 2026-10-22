@@ -2,7 +2,9 @@
 
 The core implements the equations in frozen `sources/paper/main.tex` lines 474–659, SHA-256 `481a41f1bb3c7dd0f971d6cee87151242910214fda3315887778b48dc9da9bd0`. Its Python integers have arbitrary precision. Every public record and state is an immutable dataclass containing immutable tuples.
 
-This is an **algebra correctness harness**, not a complete authenticated Damascus `Verify`. A passing terminal check says only that a supplied public mathematical state satisfies the integer bound and module equation. There is no file encoder, wire profile, Fiat–Shamir hash, certified seed or context, timestamp or deadline validation, replay registry, security certification, optimized backend, or performance claim. No unresolved protocol choice is selected by this module.
+This document covers the low-level `algebra.py` and `fold.py` APIs. Their terminal check establishes only the supplied state's integer bound and module equation; these modules do not authenticate context or derive challenges.
+
+The separate [protocol layer](../damascus_a/protocol.py) now implements registration, staged Fiat–Shamir proving, serialized verification, external-evidence checks, and atomic epoch admission, using the approved [Ternary32 codec](../damascus_a/file_codec.py). See [protocol correspondence](protocol-correspondence.md) for the source-to-code mapping. Actual certification and authenticated receipt require configured external providers; strict policy still rejects because no concrete security profile is approved. Successful arithmetic or correctness-mode protocol tests do not establish certified security or deployment performance.
 
 ## Arithmetic
 
@@ -73,7 +75,7 @@ check_terminal(state: PublicState, opening: int) -> bool
 
 `round_prove` checks the current integer witness bound and its commitment equation, requires explicit `x,y` in `1..T` with inverses modulo `q`, and returns both stage states. Witness arithmetic never reduces modulo `q`.
 
-`round_update` needs only the public state, record, and explicit challenges. It folds the generator family and commitment and rejects a failed polynomial parity check. `replay` requires level zero and exactly `d` ordered records and challenge pairs. These challenges are caller-supplied mathematical inputs, never represented as Fiat–Shamir challenges or authenticated randomness.
+`round_update` needs only the public state, record, and explicit challenges. It folds the generator family and commitment and rejects a failed polynomial parity check. `replay` requires level zero and exactly `d` ordered records and challenge pairs. This low-level API accepts the supplied challenge values without deriving them or certifying their provenance. The separate protocol layer derives its Fiat–Shamir challenges from the bound context and transcript.
 
 `final_open` returns the signed terminal integer unchanged after checking its terminal bound and opening. `check_terminal` compares the transmitted integer to `B` **before** reducing for the equation, then checks every module coordinate. The norm comparison uses exact bit bounds to avoid constructing an enormous power for a small opening; no norm approximation or additional parameter cap is introduced. Explicitly requesting `parameters.terminal_bound` still constructs that exact integer. A validly typed terminal state with a failed norm or equation returns `False`. Malformed types/shapes, nonterminal calls, invalid challenges, inconsistent prover states, or parity failures raise `TypeError` or `ValueError`.
 
@@ -91,6 +93,40 @@ C_next = even(C_tilde) + (Y/y)*L_poly + y*R_poly
 ```
 
 There is no `Y` factor inside `L_poly`. Swapping polynomial cross terms preserves their sum and can pass parity; it is not sufficient to test parity alone.
+
+## Staged protocol integration
+
+The existing round APIs remain available. The protocol layer can use the validated stages below to bind terms before deriving each Fiat–Shamir challenge. This module itself never derives a challenge or authenticates a context.
+
+```python
+vector_cross_terms(state: WitnessState) -> tuple[Module, Module]
+vector_prove(state: WitnessState, x: int,
+             L: Module | None = None, R: Module | None = None) -> VectorWitnessState
+polynomial_cross_terms(state: VectorWitnessState) -> tuple[Module, Module]
+polynomial_prove(state: VectorWitnessState, y: int,
+                 L: Module | None = None, R: Module | None = None) -> WitnessState
+
+vector_update(state: PublicState, L: Module, R: Module, x: int) -> VectorPublicState
+parity_validate(state: VectorPublicState, L: Module, R: Module) -> None
+polynomial_update(state: VectorPublicState, L: Module, R: Module, y: int) -> PublicState
+```
+
+The prover sequence is: compute vector terms; derive `x` externally from the canonical bound transcript; call `vector_prove`; compute polynomial terms and check parity; derive `y` externally; call `polynomial_prove`. `polynomial_cross_terms` already checks parity before returning. The verifier calls `vector_update`, then `parity_validate` **before deriving `y`**, and finally `polynomial_update`. Polynomial update also rechecks parity for safe standalone use, before validating the supplied `y`.
+
+Each prover entry point checks the stage's witness type, shape, integer norm, and commitment opening. The full-round bound at level `j` is `(1+T)**(2*j)`; the vector intermediate bound is exactly `(1+T)**(2*j+1)`. The capped integer comparison also handles this odd exponent without constructing a huge power for a small witness. The folded witness remains an integer array.
+
+Optional prover terms must either both be omitted, or both supplied and individually equal freshly computed terms. A check only of the resulting commitment is insufficient: replacing vector terms with `L+x*x*delta, R-delta` leaves that commitment unchanged. Similarly, replacing polynomial terms with `L+delta, R-delta` leaves parity unchanged. The prover APIs reject both alterations. Public update APIs do not claim they can establish witness-derived term authenticity from algebra alone.
+
+For exclusive verification-stage timing, public generator and commitment calculations are also available separately:
+
+```python
+vector_generators(state: PublicState, x: int) -> Generators
+vector_commitment(state: PublicState, L: Module, R: Module, x: int) -> Module
+polynomial_generators(state: VectorPublicState, y: int) -> Generators
+polynomial_commitment(state: VectorPublicState, L: Module, R: Module, y: int) -> Module
+```
+
+These pure functions validate their input states and challenges; commitment helpers also validate terms, and `polynomial_commitment` checks parity before `y`. `polynomial_generators` has no term arguments and therefore cannot perform parity validation; callers must complete the earlier `parity_validate` step before deriving its challenge. Combined updates compose these helpers and construct a validated output state. Timers around individual helpers include their input-validation overhead; they separate generator arithmetic from commitment/parity arithmetic and do not overlap. State construction and other protocol work must also be included in total verification time by the caller.
 
 ## Minimal fixture
 
@@ -119,4 +155,4 @@ assert not check_terminal(terminal, opening + p.q)
 
 Run `python -m unittest discover -s tests -v` for the repository suite. The core tests compare negacyclic products against an independent ordinary integer polynomial product followed by a separate reduction. They run 120 seeded chains at `d=1,2`, checking both stage commitments, cross terms, integer witnesses, and generators independently. The fixture moduli `2**31-1` and `2**521-1` are explicitly correctness fixtures; their use does not imply Module-SIS hardness.
 
-Counterexamples cover original cross-term orientation, swapped terms, parity corruption, omission of `Y`, the degree-one sign, negative integer lifts, values larger than 64 bits, same-residue out-of-bound openings, wrong terminal coordinates, malformed shapes and types, noncanonical residues, and missing/extra/reordered records, and huge synthetic-depth norm comparisons without materializing the bound. The zero-depth identity is also tested as a mathematical boundary case, without treating it as a deployable storage-audit configuration.
+Staged tests additionally run 40 seeded chains, compare staged and full-round results with direct commitment recomputation, test exact odd-exponent intermediate bounds, enforce supplied-term equality even for cancelling alterations, and check parity before an invalid polynomial challenge. Counterexamples cover original cross-term orientation, swapped terms, parity corruption, omission of `Y`, the degree-one sign, negative integer lifts, values larger than 64 bits, same-residue out-of-bound openings, wrong terminal coordinates, malformed shapes and types, noncanonical residues, and missing/extra/reordered records, and huge synthetic-depth norm comparisons without materializing the bound. The zero-depth identity is also tested as a mathematical boundary case, without treating it as a deployable storage-audit configuration.

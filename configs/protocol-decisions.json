@@ -1,12 +1,63 @@
 {
   "frozen_manuscript_sha256": "481a41f1bb3c7dd0f971d6cee87151242910214fda3315887778b48dc9da9bd0",
-  "status": "not_deployable_as_a_complete_protocol",
-  "file_codec": null,
-  "wire_profile": null,
-  "fiat_shamir_suite": null,
+  "updated_on": "2026-10-22",
+  "status": "complete_reference_protocol_correctness_only",
+  "deployment_ready": false,
+  "complete_protocol_path_implemented": true,
+  "default_policy": "strict",
+  "strict_policy_status": "rejects_no_approved_security_profile",
+  "correctness_policy": "explicit_opt_in_retains_parameter_audit_not_formal_evidence",
+  "file_codec": {
+    "name": "Ternary32Codec",
+    "profile": "DF-Ternary32-v1",
+    "implementation": "damascus_a.file_codec.Ternary32Codec",
+    "status": "user_approved_and_implemented",
+    "approval_condition": "preserve_frozen_fold_equations_extraction_bound_and_claims",
+    "block_bytes": 32,
+    "byte_order": "unsigned_big_endian",
+    "trit_count": "minimum c with 3**c >= 2**(8*r)",
+    "full_block_trits": 162,
+    "trit_order": "least_significant_first",
+    "digit_to_coefficient": {
+      "0": 0,
+      "1": 1,
+      "2": -1
+    },
+    "partial_block": "actual_remaining_byte_length",
+    "block_order": "file_order",
+    "flattening": "polynomial_index*n+degree",
+    "global_padding": "zero_to_4**d",
+    "coefficient_count": "162*floor(ell/32)+c(ell mod 32)",
+    "descriptor_constant": "damascus_a.file_codec.TERNARY32_DESCRIPTOR",
+    "bound_context_fields": [
+      "full_codec_descriptor",
+      "registered_original_byte_length"
+    ],
+    "injectivity_scope": "byte_string_with_its_bound_registered_length",
+    "capacity_overflow": "reject",
+    "surplus_block_codewords": "reject",
+    "nonzero_global_padding": "reject",
+    "streaming_scope": "block_conversion_only_full_protocol_witness_still_materialized",
+    "independent_proof_chunking": false
+  },
+  "wire_profile": "DF-wire-v1",
+  "wire_status": "implemented_typed_canonical_bounded",
+  "fiat_shamir_suite": "DF-SHAKE256-v1",
+  "fiat_shamir_binding": "full_canonical_context_and_full_indexed_prefix",
   "certified_context_adapter": null,
+  "publication_evidence_adapter": null,
+  "external_evidence_interfaces": "implemented_abstract_fail_closed",
+  "admission_ledger": "persistent_SQLite_atomic_registration_epoch_claim_after_success",
   "approved_security_parameters": null,
   "candidate_two_child_extractor_adopted": false,
   "chunking_adopted": false,
-  "formal_collection_authorized": false
+  "gpu_backend_implemented": false,
+  "formal_collection_authorized": false,
+  "performance_status": "correctness_diagnostics_only_no_formal_measurements",
+  "remaining_external_dependencies": [
+    "approved_concrete_security_profile",
+    "configured_authenticated_epoch_context_provider",
+    "configured_complete_proof_publication_receipt_provider",
+    "verified_local_platform_inventory_before_any_future_formal_collection"
+  ]
 }

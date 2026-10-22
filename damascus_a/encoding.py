@@ -1,8 +1,9 @@
-"""Canonical framing primitives, NOT an approved Damascus wire profile or file codec.
+"""Canonical framing primitives used by the versioned Damascus wire profile.
 
 Lengths are unsigned 32-bit big endian. Integer magnitudes are minimal big endian,
 zero uses an empty magnitude. Signed values carry a single 0/1 sign byte. These
-primitives are tested independently; no protocol transcript is encoded with them.
+primitives are tested independently. Protocol frames are defined in wire.py;
+the ternary byte-to-witness mapping is defined separately in file_codec.py.
 """
 
 MAX_BLOB = 8 * 1024 * 1024

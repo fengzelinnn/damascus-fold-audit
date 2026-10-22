@@ -1,53 +1,84 @@
-# Damascus Fold A：隔离实现设计与待确认事项
+# Damascus Fold A：完整参考协议设计与部署边界
 
-日期：2026-10-22。仅以 `sources/paper/manifest.json` 指定的原始 main.tex/PDF 为论文依据。当前范围是可行性、确定公式的参考内核、正确性测试和 A 组实验工具；正式性能采集等待两台本地平台准备。
+日期：2026-10-22。论文依据仍为 sources/paper/manifest.json 冻结的原始 main.tex/PDF。当前已实现从原始字节注册到 epoch 证明、完整公开验证和一次性准入的 CPU Python 参考流程；显式 correctness 策略可以执行，默认 strict 策略因尚无获批安全参数而拒绝。完整工程路径不等于部署就绪，也不是正式性能结果。
 
-## 已确定约束
+## 保持的约束
 
-- 原 BPoSt 目录、分支、提交保持不变。新项目为 `/workspace/damascus-fold-a`，本地分支 `local/damascus-a`。
-- 现稿 `beta0=1`, `T>=4` 且为二次幂，`N0=n0=2^d`。保留四孩子提取界、原始 L/R 定义、奇偶检查、整数终端范数。
-- 先用 Python 任意精度整数实现独立数学参考内核，避免把固定 CRT 当成现稿模数。此内核不代表最终优化 Rust/CUDA 性能。
-- 不复用旧图，不读取其像素或矢量取数；不分析 B 组。没有跨地域部署或付费资源。
-- 仅进行真实小规模单元/差分测试；任何布局夹具必须标为 `fixture`，禁止成为论文数据。
-- 原论文与旧源码快照只保留本地并从上传清单排除。只提交本项目代码、测试、配置模板、文档及来源哈希。
+- 原 BPoSt 目录、分支和提交不变；隔离项目位于 /workspace/damascus-fold-a。
+- 保留 β₀=1、二次幂 T≥4、N₀=n₀=2ᵈ、四孩子提取界、原始 L/R 定义、奇偶检查和整数终端范数。没有采用两孩子候选或独立分块证明。
+- Python 任意精度整数内核独立实现现稿公式。没有移植旧固定 CRT、旧源码或旧计时；没有实现面向现稿参数的优化 Rust/CUDA 后端。
+- 不复用旧图、不取其像素/矢量数据、不分析 B 组；没有跨地域部署或付费资源。
+- 正确性运行与 fixture 不能成为论文性能数据；正式采集仍未授权。两台本地平台规格必须通过预检获得。
+- 原论文、旧源码快照、私有定位信息、真实日志及服务器配置保留本地并排除上传；本次文档更新不执行发布。
 
-## 最小模块
+## 已实现的完整执行路径
 
-1. `parameters.py`：按现稿验证数学条件；输出界、位宽、明显 SIS 攻击筛查和未审定状态。通过不等式不等于安全。
-2. `algebra.py`：模 q 负循环卷积、模块内积、乘当前环变量、奇偶拆分。见 main.tex 551–571。
-3. `fold.py`：给定测试挑战序列的 RoundProve/公开 RoundUpdate 和终端检查。整数见证不做模约简；公开项使用规范剩余类。此数学内核不冒充已认证 epoch 的完整协议。
-4. `encoding.py`：可独立测试的严格长度前缀与整数编码原语；最终 wire profile、文件 codec、哈希 suite 未批准前不封装成可用于论文的 protocol。
-5. `backend.py`、`telemetry.py`、`cli.py`：显式 CPU reference/GPU 请求与 fallback 原因；真实测试日志；正式 benchmark 默认关闭。
-6. `aggregate.py`、`plotting.py`：独立日志验证与聚合、A1–A5 图形脚本、空白可编辑 PPT 和矢量 PDF；没有数据即显示没有数据。
-7. 两平台预检与运行脚本：读取实际 CPU/RAM/GPU/OS，不能填入未核实规格。无远程执行。
+| 模块 | 当前能力与边界 |
+|---|---|
+| parameters.py | 现稿充分不等式、模数状态及明显 SIS 攻击审计；通过不等式不等于安全审定。 |
+| algebra.py、fold.py | 负循环环/模块算术、分阶段折叠、公开生成元重放、parity、整数 norm 和全部 k 坐标 opening；保留显式测试挑战 API。 |
+| codecs.py、file_codec.py | 显式 FileCodec 合约、descriptor 一致性和规范编码像检查；已实现用户批准的 Ternary32Codec。 |
+| protocol_types.py、encoding.py、wire.py | 不可变公共类型及完整 DF-wire-v1：严格版本/类型/长度 framing、规范整数/剩余类、记录索引、资源预检。 |
+| transcript.py | DF-SHAKE256-v1：完整规范 context、完整有序前缀及当前交叉项的域分离输入；无偏取值到 1…T。标识摘要不替代挑战输入。 |
+| environment.py | 抽象 epoch/完整 proof 接收证据验证接口、结果绑定检查和 SQLite 原子持久化准入账本；没有默认接受的认证提供者。 |
+| protocol.py | setup、register_bytes/register_encoded、epoch_init、prove_epoch、verify_published、verify；默认 strict 拒绝，显式 correctness 保留完整参数审计。 |
+| protocol_artifacts.py | 从实际 wire bytes 分账完整 proof、逐轮记录与整数opening，另列 registration/context/外部证据；不等于网络流量测量。 |
+| backend.py、telemetry.py、cli.py | CPU reference 路径及诊断/实验接口；GPU 未实现，默认请求报错，显式 fallback 必须记录实际 CPU 与原因。 |
+| aggregate.py、plotting.py、平台脚本 | 独立日志验证、A1–A5 图与导出、两平台预检；缺数据或部署依赖时不填造数据。 |
 
-## 核心正确性验收
+Setup 默认用系统随机源逐系数采样生成元，分配前执行资源预检与参数审计；注入采样器仅作显式测试工具。Register 验证 codec descriptor、原始长度、三值系数/形状及完整规范往返，再计算初始承诺。每次 EpochInit/Prove 从原始登记见证和生成元开始，不接续上一 epoch 的终态。
 
-向量阶段 L=<fL,gR>、R=<fR,gL>，witness fL+x fR、generator gL+x^-1 gR。
-多项式阶段 L=<fe,go>、R=<fo,ge>（L 内不含 Y），检查 odd(Ctilde)=L+R；witness fe+y fo、generator ge+(Y/y)go；承诺 E+(Y/y)L+yR。
-每个阶段与直接重算 commitment 独立比对；终环 Y=-1 必须正确处理。反例包括交换 L/R、漏 Y、损坏奇偶项、维度错误、非规范剩余类、错误整数 opening 与超范数值。
+注册 wire 包含完整参数和初始生成元；proof 仅包含32字节上下文标识、恰好 d 个有索引记录及有符号整数终值，不重复 g₀。完整 context 和外部证据单独列为实际对象，不能视为免费的网络开销。
 
-## 必须由用户确认后才能进入完整部署协议的选择
+Verify 严格解析 proof，校验外部 context 与完整 proof 发布证据，重建全部生成元和承诺，每轮先检查奇部再派生多项式挑战，最后检查未经模约减的整数 norm 和全部 k 坐标终值等式。verify_published 可重复历史验证；verify 在所有检查成功后才原子准入，错误证明不消耗 epoch。准入键绑定 registration 与 epoch，改变 seed/deadline 不产生新名额。
 
-| 编号 | 待确认的具体问题 | 建议与当前处理 |
+## 已批准的 Ternary32Codec
+
+用户已批准该三值 codec 实例，条件是不改变冻结论文的折叠公式、提取界或安全/性能主张。它具体化现稿公开 codec 参数，不将被注释的论文示例当作生效规范。
+
+- 顺序块最多32字节，以 unsigned big-endian 整数解释。
+- r 字节块恰好用 c(r)=min{c:3ᶜ≥2⁸ʳ} 个三进制位，即 ceil(log₃256ʳ)；c(0)=0，c(32)=162。
+- 三进制位低位在前；数字 0/1/2 映射到系数 0/1/−1，不足的高位补零。
+- 尾块按实际 r 编码；各块按文件顺序串接，以 polynomial_index·n+degree 排列，整个见证余量补零至 M=4ᵈ。
+- 所需系数为 162·floor(ℓ/32)+c(ℓ mod 32)。容量不足、超出 r 字节值域的剩余码字、非零全局 padding 均拒绝。
+- 使用 file_codec.py 中完整 TERNARY32_DESCRIPTOR，pp.codec 与实现必须逐字匹配；descriptor 与原始长度 ℓ 一起进入完整 context 绑定。
+- 注入性包含登记长度：不同长度的全零字节可能产生相同 padded witness，但 ℓ 不同。省略 ℓ 后不能声称 witness 单独区分所有变长文件。
+
+32字节只是局部编码转换块，不是独立 commitment、epoch 或证明分块。iterencode 最多把32字节转换成整数；encode 仍物化整个 N×n 见证，decode 仍物化原始字节，不由此推导 GB 级内存或性能可行性。
+
+## 核心正确性与验证边界
+
+向量阶段 L=〈fL,gR〉、R=〈fR,gL〉；见证 fL+x·fR，生成元 gL+x⁻¹·gR。
+
+多项式阶段 L=〈fe,go〉、R=〈fo,ge〉，L 内不含 Y；检查 odd(C̃)=L+R；见证 fe+y·fo，生成元 ge+(Y/y)·go，承诺 E+(Y/y)·L+y·R。终环 Y=−1 仍按负循环环处理。
+
+测试覆盖独立承诺重算、非零奇部、交换 L/R、漏 Y、形状/剩余类错误、完整 context/prefix 替换、整数 alias/超范数、全部 k 坐标、记录顺序、接收证据替换和准入竞争。codec 专项覆盖独立三进制 oracle、32字节边界、前导零、空文件、容量、非法码字和短读/EOF。集成测试结果由验证文档维护，本设计不把正确性测试转换成安全结论。
+
+## 决策状态与剩余依赖
+
+| 编号 | 当前状态 | 保留边界 |
 |---|---|---|
-| D1 | 原始字节如何映射到 ternary 系数；字节顺序、padding、原长绑定 | 可选逐 bit 映射 0/1（每 byte 8 系数）或每 byte 6 个平衡三进制系数；不默认选，不处理真实文件 |
-| D2 | canonical wire profile 和 Fiat–Shamir 哈希实例 | 提议带版本/类型/长度的二进制格式与 SHAKE256 无偏取值到 1..T；当前只做原语测试，协议格式待批准 |
-| D3 | 具体安全参数、目标安全位数、k、q，以及全 indexed levels 的攻击筛查 | 不给未核实安全配置；参数验证器永远不声称安全 |
-| D4 | 是否改用两孩子返回父证书候选，或固定深度全块分块 | 两者均改变待确认边界；只报告可行性，不修改或采用 |
-| D5 | certified seed、epoch deadline、可信接收时间、重放状态的本地实验适配 | 论文需要外部认证上下文；不能用 prover 自报时间/布尔值替代认证 |
-| D6 | 两平台确切 CPU/RAM/VRAM/OS 与最终基准构建 | 等本地预检，不假设；GPU实现需参数确定后进行差分验证 |
+| D1：文件 codec | Ternary32Codec 已批准并实现；不再待选逐bit或逐byte候选 | 保留 descriptor/ℓ 绑定与合法编码像检查。 |
+| D2：wire/Fiat–Shamir | DF-wire-v1、DF-SHAKE256-v1 已实现 | 全 context/prefix 与规范解析属于版本契约；未知 suite 拒绝。 |
+| D3：具体安全参数 | 尚无获批 profile；strict 默认拒绝 | q>2β_ext、素性筛查或测试通过不能代替各 indexed levels 的安全评审。 |
+| D4：两孩子提取/独立证明分块 | 未采用 | 不把32字节 codec 转换块误记为协议分块。 |
+| D5：认证与接收证据 | 接口、绑定校验和持久化准入已实现；生产 provider 未配置 | 需要真实证书及同一时间/顺序域的完整 proof 认证及时接收证据。 |
+| D6：硬件/GPU/正式采集 | 规格待预检；新 GPU 未实现；正式采集未授权 | 参考诊断不标为优化 Rust/CUDA 或论文测量。 |
 
-用户手动创建并明确确认公开发布到 `fengzelinnn/damascus-fold-audit`。首次通过 Contents API 新建 README.md 曾被拒绝：403 `Resource not accessible by integration`。用户随后确认现有连接器授权已调整；再次只读核实身份、public、默认 main、空仓库与分支后，获准的一次重试成功。第一阶段源码已正常提交至 [788c0942c613eac75c616847f9856dc53f4690a6](https://github.com/fengzelinnn/damascus-fold-audit/commit/788c0942c613eac75c616847f9856dc53f4690a6)，71 个文件的目录树与本地已测试提交 `fc02477c89350bb5d070e5e5842a817ccc3febdb` 完全一致；没有强推或覆盖用户文件。较早的离线阶段包保留当时 403 的历史状态，本段为恢复发布后的状态更新。公开实现可能关联未发表研究，原论文、Drive定位信息、原始日志、服务器配置及旧源码均排除。
+外部接口可检查证据绑定，不能仅靠签名、当前时钟或调用方布尔值证明 cutoff 信息边界、seed 条件均匀性及存储时间安全。deadline 由 provider 定义其 opaque 值和边界语义；测试 provider 只验证接口行为。
 
-## A 组图及实验
+## A 组图及实验契约
 
 | 图 | 采集内容 | 布局 |
 |---|---|---|
-| A1 | 真实序列化完整 proof、每轮 record、registration 的字节数；记录 codec/wire/profile | 文件字节数—序列化字节折线，完整proof/单轮/注册分线或分面 |
-| A2 | 完整 Verify 的解析与上下文、挑战、generator replay、commitment/parity、norm、opening；total包围全部 | 冷启动/缓存分组堆叠柱，显式计时剩余项 |
-| A3 | 每次从注册文件开始的新 certified epoch，真实 setup 与逐次 prove/verify | 横轴审计次数，纵轴 (setup+累计prove+verify)/次数；单独标明是否摊销setup |
-| A4 | 每平台每规模的 peak RSS、采样VRAM、成功/超时/OOM/参数拒绝 | 两平台分面，资源曲线及失败标记；显存采样峰值不伪称精确峰值 |
-| A5 | ADJ21 公开低存储PoR与ePoSt的协议/参数/保证/已发表数据/本地实测来源 | 语义与来源先分组；不同硬件不按秒数混排 |
+| A1 | 实际序列化 proof/每轮record/registration；另列 context/外部证据，记录 codec/wire/profile | 文件字节数—序列化字节折线，按对象分线或分面 |
+| A2 | 完整 Verify 的解析与上下文、挑战、generator replay、commitment/parity、norm、opening；total 包围全部，含 other | 冷启动/缓存分组堆叠柱 |
+| A3 | 每次从原始注册开始的新认证 epoch，真实 setup 与逐次 prove/verify | (setup+累计prove+verify)/次数；明确摊销范围 |
+| A4 | 每平台每规模的 peak RSS、采样VRAM、成功/超时/OOM/参数拒绝 | 两平台分面，资源曲线及失败标记 |
+| A5 | ADJ21 公开低存储PoR与ePoSt的协议/参数/保证/已发表数据/实测来源 | 语义与来源先分组；不同硬件不按秒数混排 |
 
-全部灰度、线型与纹理区分；最终使用 Libertine + newtx 数学字体。缺字体时预览显式标注 fallback，publication 导出必须失败关闭。
+完整验证及互斥阶段计时接口已实现；当前数值只用于明确标记的正确性诊断，不证明存储时间安全或正式性能。图形使用灰度、线型及纹理；最终使用 Libertine + newtx 数学字体。缺字体时预览标注 fallback，publication 导出失败关闭。
+
+## 发布边界
+
+用户此前已批准公开目标仓库 fengzelinnn/damascus-fold-audit。第一阶段发布及权限恢复属于已记录历史；本次新增实现的审查、集成测试和正常 fast-forward 发布由主流程统一执行。原论文、Drive 定位信息、原始日志、服务器配置及旧源码始终排除。本次文档任务没有 commit、push 或远端修改。

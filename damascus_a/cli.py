@@ -1,4 +1,4 @@
-"""Commands for feasibility and small algebra correctness runs, not paper timing."""
+"""Feasibility and small algebra/full-protocol correctness runs, not paper timing."""
 import argparse
 import csv
 from dataclasses import asdict
@@ -104,11 +104,19 @@ def main(argv=None):
     p.add_argument('--seed',type=int,default=20261022)
     p.add_argument('--backend',choices=['cpu-reference','gpu'],default='cpu-reference')
     p.add_argument('--allow-cpu-fallback',action='store_true')
-    sub.add_parser('benchmark',help='Closed until protocol and platform decisions are approved')
+    p=sub.add_parser('protocol-correctness',help='Run tiny complete epochs with explicit TEST ONLY evidence')
+    p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--epochs',type=int,default=2)
+    p.add_argument('--input-hex',default='007fff')
+    p.add_argument('--test-seed',type=int)
+    p.add_argument('--correctness-only',action='store_true')
+    p.add_argument('--backend',choices=['cpu-reference','gpu'],default='cpu-reference')
+    p.add_argument('--allow-cpu-fallback',action='store_true')
+    sub.add_parser('benchmark',help='Closed pending approved security parameters and local collection authorization')
     args=parser.parse_args(argv)
     try:
         if args.command=='benchmark':
-            parser.error('formal performance collection is not authorized; protocol decisions D1-D6 remain pending')
+            parser.error('formal performance collection is not authorized; approved security parameters, real external evidence and prepared platforms are required')
         if args.command=='preflight':
             result=machine_info()
             if args.output:
@@ -120,6 +128,9 @@ def main(argv=None):
             print(dump(asdict(result)),end='')
             return 2 if result.status.startswith('rejected') else 0
         elif args.command=='correctness':correctness(args)
+        elif args.command=='protocol-correctness':
+            from .protocol_run import protocol_correctness
+            protocol_correctness(args)
     except (ValueError,OSError,BackendUnavailable) as exc:
         print(str(exc),file=sys.stderr);return 2
     return 0
