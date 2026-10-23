@@ -1,4 +1,4 @@
-"""Feasibility and small algebra/full-protocol correctness runs, not paper timing."""
+"""Correctness and explicitly low-security full-protocol experiments."""
 import argparse
 import csv
 from dataclasses import asdict
@@ -110,8 +110,42 @@ def main(argv=None):
     p.add_argument('--input-hex',default='007fff')
     p.add_argument('--test-seed',type=int)
     p.add_argument('--correctness-only',action='store_true')
-    p.add_argument('--backend',choices=['cpu-reference','gpu'],default='cpu-reference')
+    p.add_argument('--backend',choices=['cpu-reference','cpu-fused','gpu'],default='cpu-reference')
     p.add_argument('--allow-cpu-fallback',action='store_true')
+    p=sub.add_parser('protocol-experiment',help='Complete low-security epochs; TEST ONLY external evidence')
+    p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--experimental-only',action='store_true')
+    p.add_argument('--profile',default='toy-ternary32-full-v1')
+    p.add_argument('--d',type=int,required=True)
+    p.add_argument('--T',type=int,default=4);p.add_argument('--k',type=int,default=2)
+    p.add_argument('--q',type=lambda s:int(s,0),default=(1<<31)-1)
+    p.add_argument('--epochs',type=int,default=3)
+    inputs=p.add_mutually_exclusive_group()
+    inputs.add_argument('--input-file',type=Path)
+    inputs.add_argument('--input-hex',default='007fff')
+    p.add_argument('--test-seed',type=int)
+    p.add_argument('--backend',choices=['cpu-reference','cpu-fused','gpu'],default='cpu-fused')
+    p.add_argument('--allow-cpu-fallback',action='store_true')
+    p.add_argument('--context-mode',choices=['decode','retained'],default='decode')
+    p.add_argument('--memory-mib',type=int,default=512)
+    p.add_argument('--work-budget',type=int,default=100000000)
+    p=sub.add_parser('experiment',help='Bounded low-security matrix; separate process for each case')
+    p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--experimental-only',action='store_true')
+    p.add_argument('--depths',default='2,3,4')
+    p.add_argument('--T',type=int,default=4);p.add_argument('--k',type=int,default=2)
+    p.add_argument('--q',type=lambda s:int(s,0),default=(1<<31)-1)
+    p.add_argument('--epochs',type=int,default=3)
+    p.add_argument('--repetitions',type=int,default=2)
+    p.add_argument('--test-seed',type=int,default=20261023)
+    p.add_argument('--backend',choices=['cpu-reference','cpu-fused'],default='cpu-fused')
+    p.add_argument('--timeout-seconds',type=int,default=120)
+    p.add_argument('--memory-mib',type=int,default=512)
+    p.add_argument('--work-budget',type=int,default=100000000)
+    p.add_argument('--environment-label',default='unspecified')
+    p=sub.add_parser('plot-experiment',help='Render explicitly experimental figures, outside formal publication admission')
+    p.add_argument('--matrix',type=Path,required=True)
+    p.add_argument('--output',type=Path,required=True)
     sub.add_parser('benchmark',help='Closed pending approved security parameters and local collection authorization')
     args=parser.parse_args(argv)
     try:
@@ -131,6 +165,22 @@ def main(argv=None):
         elif args.command=='protocol-correctness':
             from .protocol_run import protocol_correctness
             protocol_correctness(args)
+        elif args.command=='protocol-experiment':
+            from .experiments import protocol_experiment
+            protocol_experiment(args)
+        elif args.command=='experiment':
+            from .experiments import parse_depths, run_experiment_matrix
+            result=run_experiment_matrix(args.output,depths=parse_depths(args.depths),
+                q=args.q,T=args.T,k=args.k,epochs=args.epochs,repetitions=args.repetitions,
+                backend=args.backend,test_seed=args.test_seed,experimental_only=args.experimental_only,
+                timeout_seconds=args.timeout_seconds,memory_mib=args.memory_mib,work_budget=args.work_budget,
+                environment_label=args.environment_label)
+            print(dump(dict(output=str(args.output),status=result['status'],
+                           cases=len(result['cases']),security_status=result['security_status'])),end='')
+            return 0 if result['status']=='complete' else 2
+        elif args.command=='plot-experiment':
+            from .experimental_plots import render_experimental
+            print(dump(render_experimental(args.matrix,args.output)),end='')
     except (ValueError,OSError,BackendUnavailable) as exc:
         print(str(exc),file=sys.stderr);return 2
     return 0

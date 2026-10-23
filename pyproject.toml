@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "damascus-fold-audit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Frozen-manuscript Damascus Fold protocol, feasibility and A-group experiment workbench"
 requires-python = ">=3.12,<3.13"
 dependencies = []

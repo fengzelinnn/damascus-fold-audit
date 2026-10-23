@@ -2,11 +2,12 @@
 
 此仓库实现冻结论文的完整 CPU 参考执行路径：Setup、合法文件登记、EpochInit、Prove、规范序列化、完整前缀 Fiat–Shamir、Verify，以及外部证据验证接口和持久 epoch 接收登记。文件使用已确认的流式 32 字节三值编码，折叠公式、奇偶检查、整数终端范数和全部 k 个 opening 坐标均按现稿实现。
 
-**执行正确性已经可测；存储时间保证仍需要经审定的安全参数及真实外部认证/时间条件。** 当前没有经批准的具体安全参数配置，所有协议入口默认严格拒绝；只有显式 `policy='correctness'` / `--correctness-only` 执行小规模测试并保留完整参数审计。测试证据适配器标为 `TEST_ONLY`，不提供可信时间。没有正式性能结果，也没有 GPU 算术后端。
+**执行正确性已经可测；存储时间保证仍需要经审定的安全参数及真实外部认证/时间条件。** 当前没有经批准的具体安全参数配置，所有协议入口默认严格拒绝；显式 `policy='correctness'` / `--correctness-only` 可执行小规模测试。另有用户已批准的 `--experimental-only` 低安全参数效率采集入口，保留完整协议检查和原参数审计，每条数据标明实验范围。测试证据适配器标为 `TEST_ONLY`，不提供可信时间。没有正式安全参数性能结果，也没有 GPU 算术后端。
 
 ## 已实现与对应说明
 
 - [完整协议与编码规范](docs/full-protocol.md)：实际 API、wire/挑战、完整 Verify、外部证据边界。
+- [低安全参数完整实验](docs/experiments.md)：任意精度 CPU 后端、资源预检、上下文解码/复用计时、独立进程采集及明确标注的实验图。
 - [可行性结论](docs/feasibility.md)：现稿充分条件要求 `log2(q)>M²+7+log2(B)`；它不是协议固有下界，`q>2beta_ext` 也不证明 SIS 安全。
 - [逐式对应](docs/protocol-correspondence.md)、[原实现独立审计](docs/legacy-audit.md)、[剩余决策](docs/design.md)。没有采用候选提取界或分块协议。
 - [A1–A5 数据与绘图](docs/a-group.md)、[ADJ21/ePoSt 来源](docs/baselines.md)、[部署](docs/deployment.md)、[已执行验证](docs/validation.md)。
@@ -22,6 +23,15 @@ python -m damascus_a correctness --d 2 --k 2 --cases 4 --output runs/local-algeb
 ```
 
 完整协议运行生成真实 proof、registration、context、测试证据二进制，以及逐阶段 JSON/CSV 和本地重放登记；每个新 epoch 从原始文件重新开始。完整 Verify 包含最后 opening 和持久接收检查。日志明确是 `correctness_test`，缓存状态为未控制，不能送入论文图表。目录已存在时拒绝覆盖。
+
+获准的低安全参数实验使用单独入口和数据类型，完整保留上述协议步骤：
+
+```bash
+python -m damascus_a experiment --experimental-only --output runs/toy-full --depths 2,3,4,5,6 --epochs 3 --repetitions 2 --backend cpu-fused --environment-label my-actual-machine
+python -m damascus_a plot-experiment --matrix runs/toy-full/matrix.json --output outputs/toy-full
+```
+
+这里测量实际代码对实际生成文件字节的执行效率；不是生产安全证据或真实外部认证延时。`cpu-fused` 使用 Python 任意精度精确累加；`cpu-reference` 仍可选作差分参考。完整实验计时含上下文初始化和最终 opening/admission，系统缓存状态不受控。文件容量、限额和图表边界见实验说明。
 
 ```bash
 python -m unittest tests.test_protocol tests.test_file_codec tests.test_wire tests.test_transcript tests.test_environment -v

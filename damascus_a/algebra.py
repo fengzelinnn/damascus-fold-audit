@@ -7,6 +7,8 @@ primality, parameter security, serialization, or a cryptographic protocol.
 from dataclasses import dataclass
 from math import gcd
 
+from .backend import get_arithmetic_backend
+
 
 def require_integer(value: object, name: str) -> None:
     """Reject booleans and implicit numeric conversions at typed boundaries."""
@@ -151,6 +153,12 @@ def module_inner(witness: Witness, generators: Generators) -> Module:
     validate_witness(witness, len(generators), ring.n)
     for generator in generators:
         validate_module(generator, ring, k, 'generator')
+    backend = get_arithmetic_backend()
+    if backend is not None:
+        return tuple(RingElement(ring, backend.accumulate_negacyclic(
+            ((polynomial, generator[coordinate].coefficients)
+             for polynomial, generator in zip(witness, generators)),
+            n=ring.n, q=ring.q)) for coordinate in range(k))
     result = [ring.zero() for _ in range(k)]
     for polynomial, generator in zip(witness, generators):
         reduced = ring.element(polynomial)

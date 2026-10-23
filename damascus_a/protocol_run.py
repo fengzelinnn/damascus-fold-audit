@@ -19,7 +19,7 @@ from time import perf_counter_ns
 from uuid import uuid4
 
 from . import protocol, transcript, wire
-from .backend import select_backend
+from .backend import select_backend, using_backend
 from .encoding import Reader, encode_bytes, encode_uint, frame, read_frame
 from .environment import (AdmissionLedger, EnvironmentValidationError,
     EpochContextValidator, EpochValidation, PublicationEvidenceValidator,
@@ -28,6 +28,7 @@ from .file_codec import Ternary32Codec
 from .fold import FoldParameters
 from .protocol_artifacts import serialization_evidence
 from .protocol_types import EpochContext, ProtocolParameters
+from .resources import ResourceBudget, preflight_resources
 from .telemetry import machine_info, peak_rss_bytes
 
 VERIFY_STAGES = ('parsing_context', 'challenges', 'generator_replay',
@@ -37,6 +38,9 @@ _PAPER_SHA256 = '481a41f1bb3c7dd0f971d6cee87151242910214fda3315887778b48dc9da9bd
 _DISCLAIMER = ('NON-PAPER correctness telemetry. TEST_ONLY simulated evidence; '
                'real certification, time, seed distribution and cutoff conditions '
                'are not established. The retained parameter audit is adverse.')
+_EXPERIMENT_DISCLAIMER = ('NON-PAPER low-security experimental measurements. '
+    'TEST_ONLY simulated evidence; no real certification or external timing is measured. '
+    'The unchanged parameter audit is retained; production/strict policy remains closed.')
 
 
 def simulated_deadline(tick: int = 100) -> bytes:
@@ -190,17 +194,19 @@ def _measured_verify(raw: bytes, ctx: EpochContext, ledger: _TimedAdmissionLedge
 
 
 def _sources() -> dict:
-    names = ('algebra', 'backend', 'codecs', 'encoding', 'environment', 'file_codec',
+    names = ('algebra', 'arithmetic', 'backend', 'codecs', 'encoding', 'environment', 'file_codec',
              'fold', 'parameters', 'protocol', 'protocol_artifacts', 'protocol_run',
-             'protocol_types', 'telemetry', 'transcript', 'wire')
+             'protocol_types', 'resources', 'telemetry', 'transcript', 'wire')
     root = Path(__file__).resolve().parent
+    optional = ('cli', 'experiment', 'experiments', 'experimental_plots')
+    names += tuple(name for name in optional if (root / f'{name}.py').is_file())
     files = {f'damascus_a/{name}.py': sha256((root / f'{name}.py').read_bytes()).hexdigest()
              for name in names}
     digest = sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return dict(source_sha256=digest, source_files_sha256=files)
 
 
-def _write_csv(out: Path, rows: list[dict]) -> None:
+def _write_csv(out: Path, rows: list[dict], *, experimental: bool = False) -> None:
     fields = ['record_id', 'run_id', 'data_kind', 'non_paper', 'publication_eligible',
               'certify_real_time', 'external_conditions_not_established', 'cache',
               'epoch_sequence', 'epoch_id', 'seed_hex', 'file_bytes', 'status', 'accepted',
@@ -208,9 +214,15 @@ def _write_csv(out: Path, rows: list[dict]) -> None:
               'backend_actual', 'backend_fallback', 'backend_reason', 'protocol_hash',
               'parameter_id', 'hardware_id', 'source_sha256', 'rounds_json']
     fields += [name + '_ns' for name in VERIFY_STAGES]
+    if experimental:
+        fields += ['profile', 'security_status', 'external_provider', 'context_mode',
+                   'first_context_decode', 'verifier_init_ns', 'verify_call_ns',
+                   'preparation_ns', 'ledger_init_ns', 'parameters_json', 'parameter_audit_json',
+                   'cache_policy_json', 'preflight_json', 'hardware_json', 'row_json']
     artifact_names = ('full_proof', 'registration', 'context', 'epoch_evidence', 'publication_evidence')
     fields += [name + suffix for name in artifact_names for suffix in ('_bytes', '_sha256', '_path')]
-    with (out / 'protocol-correctness.csv').open('x', newline='') as stream:
+    stem = 'protocol-experiment' if experimental else 'protocol-correctness'
+    with (out / f'{stem}.csv').open('x', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for row in rows:
@@ -219,6 +231,10 @@ def _write_csv(out: Path, rows: list[dict]) -> None:
             flat['source_sha256'] = row['provenance']['source_sha256']
             flat['rounds_json'] = json.dumps(row['rounds'], separators=(',', ':'))
             flat.update({name + '_ns': value for name, value in row['stages_ns'].items()})
+            if experimental:
+                for key in ('parameters', 'parameter_audit', 'cache_policy', 'preflight', 'hardware'):
+                    flat[key + '_json'] = json.dumps(row[key], sort_keys=True, separators=(',', ':'))
+                flat['row_json'] = json.dumps(row, sort_keys=True, separators=(',', ':'))
             artifacts = dict(row['auxiliary_artifacts'],
                              full_proof=row['serialization']['full_proof'],
                              registration=row['serialization']['registration'])
@@ -244,24 +260,70 @@ def run_protocol_correctness(output: Path, *, data: bytes = b'\x00\x7f\xff',
         raise ValueError('this correctness runner accepts only 0–3 actual input bytes')
     if type(epochs) is not int or not 2 <= epochs <= 4:
         raise ValueError('this correctness runner accepts only 2–4 fresh epochs')
+    return _run_protocol(output, parameters=FoldParameters(2, 4, 2, (1 << 521) - 1),
+        profile='correctness-only-unsafe', data=data, epochs=epochs, test_seed=test_seed,
+        backend=backend, allow_cpu_fallback=allow_cpu_fallback, context_mode=None, preflight=None)
+
+
+def run_protocol_experiment(output: Path, *, parameters: FoldParameters, profile: str,
+        data: bytes, epochs: int = 2, test_seed: int | None = None,
+        backend: str = 'cpu-reference', allow_cpu_fallback: bool = False,
+        experimental_only: bool = False, context_mode: str = 'decode',
+        resource_budget: ResourceBudget = ResourceBudget()) -> dict:
+    """Collect bounded, actual low-security experiments using complete Verify.
+
+    Context modes describe canonical decoding versus decoded-registration reuse,
+    not CPU/OS cache control or cached generator results. Every sample is a new
+    epoch and uses the unchanged correctness policy and persistent admission.
+    """
+    if experimental_only is not True:
+        raise ValueError('explicit experimental_only=True / --experimental-only is required')
+    if not isinstance(parameters, FoldParameters):
+        raise TypeError('parameters must be FoldParameters')
+    if type(profile) is not str or not profile.strip() or len(profile) > 128 or not profile.isprintable():
+        raise ValueError('profile must be a nonempty printable string of at most 128 characters')
+    if type(data) is not bytes:
+        raise TypeError('data must be bytes')
+    if context_mode not in ('decode', 'retained'):
+        raise ValueError('context_mode must be decode or retained')
+    preflight = preflight_resources(parameters, len(data), epochs, resource_budget)
+    return _run_protocol(output, parameters=parameters, profile=profile, data=data, epochs=epochs,
+        test_seed=test_seed, backend=backend, allow_cpu_fallback=allow_cpu_fallback,
+        context_mode=context_mode, preflight=preflight)
+
+
+def _run_protocol(output, *, parameters, profile, data, epochs, test_seed, backend,
+                  allow_cpu_fallback, context_mode, preflight):
     if test_seed is not None and type(test_seed) is not int:
         raise TypeError('test_seed must be an explicit integer or None')
     selection = select_backend(backend, allow_cpu_fallback=allow_cpu_fallback)
+    with using_backend(selection.actual):
+        return _run_protocol_active(output, parameters=parameters, profile=profile,
+            data=data, epochs=epochs, test_seed=test_seed, selection=selection,
+            context_mode=context_mode, preflight=preflight)
+
+
+def _run_protocol_active(output, *, parameters, profile, data, epochs, test_seed,
+                         selection, context_mode, preflight):
+    experimental = context_mode is not None
+    disclaimer = _EXPERIMENT_DISCLAIMER if experimental else _DISCLAIMER
+    data_kind = 'low_security_experiment' if experimental else 'correctness_test'
+    schema_kind = 'experiment' if experimental else 'correctness'
     out = Path(output)
     out.mkdir(parents=True, exist_ok=False)
     incomplete = out / 'RUN_INCOMPLETE.json'
-    incomplete.write_text(json.dumps({'status': 'incomplete', 'disclaimer': _DISCLAIMER}) + '\n')
+    incomplete.write_text(json.dumps({'status': 'incomplete', 'disclaimer': disclaimer}) + '\n')
     run_id = str(uuid4())
     created = datetime.now(timezone.utc).isoformat()
     machine = machine_info(include_gpu=False)
     hardware_id = sha256(json.dumps(machine, sort_keys=True).encode()).hexdigest()
     source = _sources()
     provenance = dict(source, source_id=run_id, captured_at=created, non_paper=True,
-        build_description='Python CPU reference source; no compiled accelerator',
+        build_description=f'Python {selection.actual} source; no compiled accelerator',
         measurement_method='perf_counter_ns whole calls; sequential exclusive Verify intervals',
         hardware_description=json.dumps(machine, sort_keys=True))
     codec = Ternary32Codec()
-    pp = ProtocolParameters(FoldParameters(2, 4, 2, (1 << 521) - 1), codec.descriptor)
+    pp = ProtocolParameters(parameters, codec.descriptor)
     rng = None if test_seed is None else random.Random(test_seed)
     setup_started = perf_counter_ns()
     setup = protocol.setup(pp, policy='correctness', randbelow=None if rng is None else rng.randrange)
@@ -274,7 +336,13 @@ def run_protocol_correctness(output: Path, *, data: bytes = b'\x00\x7f\xff',
                            registration=_save(out, 'registration.bin', registration_raw))
     input_artifact = _save(out, 'input.bin', data)
     parameter_id = sha256(pp_raw).hexdigest()
+    ledger_started = perf_counter_ns()
     ledger = _TimedAdmissionLedger(out / 'admission.sqlite3')
+    ledger_init_ns = perf_counter_ns() - ledger_started
+    retained_registration = None
+    cache_policy = dict(scope='decoded-registration reuse only', context_mode=context_mode,
+        reuse_enabled=context_mode == 'retained', generator_result_cache=False,
+        os_cache='uncontrolled', hardware_cache='uncontrolled')
     rows, seeds, previous_raw = [], set(), None
     for index in range(1, epochs + 1):
         seed = secrets.token_bytes(32) if rng is None else rng.getrandbits(256).to_bytes(32, 'big')
@@ -287,30 +355,49 @@ def run_protocol_correctness(output: Path, *, data: bytes = b'\x00\x7f\xff',
         produced = protocol.prove_epoch(ctx, registered.witness, policy='correctness')
         prove_ns = perf_counter_ns() - prove_started
         raw = produced.proof_bytes
+        preparation_started = perf_counter_ns()
+        context_raw = wire.encode_context(ctx) if experimental else None
         epoch_provider = TestOnlyEpochValidator(ctx)
         publication_provider = TestOnlyPublicationValidator(ctx, raw)
         evidence = dict(epoch_validator=epoch_provider, publication_validator=publication_provider,
                         epoch_evidence=epoch_provider.evidence, publication_evidence=publication_provider.evidence)
-        verified, verify_ns, stages = _measured_verify(raw, ctx, ledger, evidence)
+        preparation_ns = perf_counter_ns() - preparation_started
+        verifier_init_ns, first_context_decode = 0, False
+        verifier_ctx = ctx
+        if experimental:
+            init_started = perf_counter_ns()
+            if context_mode == 'decode':
+                verifier_ctx = wire.decode_context(context_raw)
+                first_context_decode = True
+            else:
+                first_context_decode = retained_registration is None
+                if first_context_decode:
+                    retained_registration = wire.decode_registration(registration_raw)
+                verifier_ctx = EpochContext(retained_registration, ctx.epoch, ctx.seed, ctx.deadline)
+            verifier_init_ns = perf_counter_ns() - init_started
+        verified, verify_call_ns, stages = _measured_verify(raw, verifier_ctx, ledger, evidence)
+        verify_ns = verifier_init_ns + verify_call_ns
+        if experimental:
+            stages['verifier_init'] = verifier_init_ns
         if not verified.accepted or not verified.admitted:
             raise RuntimeError('primary correctness verification failed: ' + verified.reason)
-        historical = protocol.verify_published(raw, ctx, policy='correctness', **evidence)
-        replay = protocol.verify(raw, ctx, ledger=ledger, policy='correctness', **evidence)
+        historical = protocol.verify_published(raw, verifier_ctx, policy='correctness', **evidence)
+        replay = protocol.verify(raw, verifier_ctx, ledger=ledger, policy='correctness', **evidence)
         diagnostics = dict(historical_verification=_verify_summary(historical),
                            same_epoch_replay=_verify_summary(replay))
         if not historical.accepted or replay.accepted or replay.reason != 'replayed_epoch':
             raise RuntimeError('historical verification / replay correctness check failed')
         if previous_raw is not None:
-            previous = protocol.verify(previous_raw, ctx, ledger=ledger, policy='correctness', **evidence)
+            previous = protocol.verify(previous_raw, verifier_ctx, ledger=ledger, policy='correctness', **evidence)
             diagnostics['previous_epoch_proof'] = _verify_summary(previous)
             if previous.accepted or previous.reason != 'malformed_or_wrong_context_proof':
                 raise RuntimeError('old proof was not rejected under the fresh epoch context')
         artifacts = _save_evidence(out, index, ctx, raw, epoch_provider.evidence,
                                     publication_provider.evidence, setup_artifacts['registration'])
-        rows.append(dict(schema='DF-protocol-correctness-epoch-v1', record_id=f'{run_id}/{index}',
-            run_id=run_id, data_kind='correctness_test', non_paper=True, publication_eligible=False,
+        rows.append(dict(schema=f'DF-protocol-{schema_kind}-epoch-v1', record_id=f'{run_id}/{index}',
+            run_id=run_id, data_kind=data_kind, non_paper=True, publication_eligible=False,
             certify_real_time=False, external_conditions_not_established=True,
-            scheme='DamascusFold', scheme_version='DF-wire-v1', profile='correctness-only-unsafe',
+            scheme='DamascusFold', scheme_version='DF-wire-v1', profile=profile,
             protocol_hash=_PAPER_SHA256, parameter_id=parameter_id, hardware_id=hardware_id,
             backend=asdict(selection), cache='uncontrolled', epoch_sequence=index,
             epoch_id=ctx.epoch.hex(), seed_hex=seed.hex(), deadline_hex=ctx.deadline.hex(),
@@ -322,10 +409,20 @@ def run_protocol_correctness(output: Path, *, data: bytes = b'\x00\x7f\xff',
             stages_ns=stages, rounds=[asdict(r) for r in produced.rounds],
             verification=_verify_summary(verified), diagnostics=diagnostics,
             provenance=provenance, **artifacts))
+        if experimental:
+            rows[-1].update(parameters=asdict(parameters), parameter_audit=asdict(setup.parameter_report),
+                security_status='not_established_low_security_experiment',
+                external_provider='TEST_ONLY_SIMULATED_PROVIDER',
+                formal_measurement=False, security_established=False, production_ready=False,
+                context_mode=context_mode, first_context_decode=first_context_decode,
+                verifier_init_ns=verifier_init_ns, verify_call_ns=verify_call_ns,
+                preparation_ns=preparation_ns, ledger_init_ns=ledger_init_ns if index == 1 else 0,
+                cache_policy=dict(cache_policy, registration_reused=context_mode == 'retained'
+                                  and not first_context_decode), preflight=preflight, hardware=machine)
         previous_raw = raw
     total = setup_once_ns + sum(r['prove_ns'] + r['verify_ns'] for r in rows)
-    report = _json_safe(dict(schema='DF-protocol-correctness-run-v1', run_id=run_id,
-        created_at=created, disclaimer=_DISCLAIMER, data_kind='correctness_test', non_paper=True,
+    report = _json_safe(dict(schema=f'DF-protocol-{schema_kind}-run-v1', run_id=run_id,
+        created_at=created, disclaimer=disclaimer, data_kind=data_kind, non_paper=True,
         formal_measurement=False, publication_eligible=False, production_ready=False,
         security_established=False, certify_real_time=False, external_conditions_not_established=True,
         cache='uncontrolled', backend=asdict(selection), hardware=machine, hardware_id=hardware_id,
@@ -363,13 +460,37 @@ def run_protocol_correctness(output: Path, *, data: bytes = b'\x00\x7f\xff',
             instruction='decode context; encode input with Ternary32Codec; prove_epoch(policy=correctness); compare exact saved proof bytes',
             admission='existing admission.sqlite3 must reject re-admission; historical verification is repeatable'),
         epochs=rows))
-    with (out / 'protocol-correctness.json').open('x') as stream:
+    if experimental:
+        variable_ns = sum(row['prove_ns'] + row['verify_ns'] for row in rows)
+        report.update(profile=profile, security_status='not_established_low_security_experiment',
+            external_provider='TEST_ONLY_SIMULATED_PROVIDER', context_mode=context_mode,
+            cache_policy=cache_policy, preflight=preflight, ledger_init_ns=ledger_init_ns,
+            setup_excluded_cost=dict(total_ns=variable_ns, count=epochs, average_ns=variable_ns / epochs,
+                formula='sum(prove_ns + verifier_init_ns + verify_call_ns) / count',
+                excludes=['setup and registration', 'ledger database creation', 'artifact writes',
+                          'canonical context encoding and TEST_ONLY evidence construction', 'diagnostics']),
+            verifier_init_ns=sum(row['verifier_init_ns'] for row in rows),
+            verify_call_ns=sum(row['verify_call_ns'] for row in rows),
+            verify_ns=sum(row['verify_ns'] for row in rows))
+        report['timing_scope'].update(
+            verifier_init=('wire.decode_context from canonical bytes for EVERY new epoch' if context_mode == 'decode'
+                else 'first epoch: wire.decode_registration plus new EpochContext; later epochs: new EpochContext reusing decoded immutable registration'),
+            verify_call='entire protocol.verify call, including all evidence checks, final norm/opening and SQLite claim',
+            verify='verifier_init_ns + verify_call_ns; sequential disjoint measured intervals',
+            preparation='canonical context encoding and TEST_ONLY evidence construction; excluded from verify and fresh epoch cost',
+            collection='decoded-registration reuse comparison only; OS/hardware caches uncontrolled; no generator-result caching',
+            external_evidence='TEST_ONLY provider execution cost, not real authority certification or publication latency')
+        report['fresh_epoch_cost']['meaning'] = 'low-security experimental accounting only; not formal security or paper evidence'
+        report['fresh_epoch_cost']['excludes'].append('canonical context encoding')
+        report['resources']['vram_status'] = 'not_measured_cpu_backend'
+    stem = 'protocol-experiment' if experimental else 'protocol-correctness'
+    with (out / f'{stem}.json').open('x') as stream:
         json.dump(report, stream, indent=2)
         stream.write('\n')
     with (out / 'epochs.jsonl').open('x') as stream:
         for row in report['epochs']:
             stream.write(json.dumps(row, sort_keys=True) + '\n')
-    _write_csv(out, report['epochs'])
+    _write_csv(out, report['epochs'], experimental=experimental)
     incomplete.unlink()
     return report
 

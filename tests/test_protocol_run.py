@@ -10,10 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from damascus_a import protocol, transcript, wire
+from damascus_a import protocol_run
 from damascus_a.aggregate import aggregate
 from damascus_a.backend import BackendUnavailable
 from damascus_a.environment import AdmissionLedger, EnvironmentValidationError
 from damascus_a.file_codec import Ternary32Codec
+from damascus_a.fold import FoldParameters
 from damascus_a.protocol_run import (TestOnlyEpochValidator,
     TestOnlyPublicationValidator, run_protocol_correctness, simulated_deadline)
 
@@ -177,6 +179,176 @@ class ProtocolRunTests(unittest.TestCase):
             changed = dataclasses.replace(ctx, deadline=simulated_deadline(89))
             with self.assertRaises(EnvironmentValidationError):
                 publication.validate(changed, raw, publication.evidence, assertion)
+
+
+class ProtocolExperimentTests(unittest.TestCase):
+    def setUp(self):
+        self.run_experiment = getattr(protocol_run, 'run_protocol_experiment', None)
+        self.assertTrue(callable(self.run_experiment), 'explicit experiment collector is missing')
+        self.parameters = FoldParameters(2, 4, 2, (1 << 31) - 1)
+
+    def test_provenance_covers_present_experiment_orchestration_modules(self):
+        source_files = protocol_run._sources()['source_files_sha256']
+        package = Path(protocol_run.__file__).parent
+        for name in ('experiments', 'experimental_plots'):
+            if (package / (name + '.py')).is_file():
+                self.assertIn('damascus_a/' + name + '.py', source_files)
+
+    def test_missing_required_source_cannot_silently_disappear_from_provenance(self):
+        original_is_file, original_read_bytes = Path.is_file, Path.read_bytes
+        def exists(path):
+            return False if path.name == 'protocol.py' else original_is_file(path)
+        def read(path):
+            if path.name == 'protocol.py':
+                raise FileNotFoundError('required protocol source is missing')
+            return original_read_bytes(path)
+        with patch.object(Path, 'is_file', exists), patch.object(Path, 'read_bytes', read):
+            with self.assertRaises(FileNotFoundError):
+                protocol_run._sources()
+
+    def test_explicit_experiment_gate_and_preflight_precede_output_and_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / 'run'
+            base = dict(parameters=self.parameters, profile='low-security-test', data=b'abc')
+            bad = ({}, {'experimental_only': 1}, {'experimental_only': True, 'epochs': 0},
+                   {'experimental_only': True, 'epochs': 33},
+                   {'experimental_only': True, 'context_mode': 'pretend-cold'},
+                   {'experimental_only': True, 'data': b'four'},
+                   {'experimental_only': True, 'profile': ''},
+                   {'experimental_only': True, 'test_seed': True},
+                   {'experimental_only': True, 'parameters': FoldParameters(100, 4, 2, 2147483647)})
+            with patch('damascus_a.protocol_run.protocol.setup', wraps=protocol.setup) as setup:
+                for changes in bad:
+                    with self.subTest(changes=changes), self.assertRaises((ValueError, TypeError)):
+                        self.run_experiment(out, **(base | changes))
+                    self.assertFalse(out.exists())
+                setup.assert_not_called()
+
+    def test_modes_measure_complete_verify_and_preserve_exact_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reports = []
+            for mode in ('decode', 'retained'):
+                out = Path(directory) / mode
+                report = self.run_experiment(out, parameters=self.parameters, profile='low-security-test',
+                    data=b'abc', epochs=2, test_seed=37, experimental_only=True, context_mode=mode)
+                reports.append(report)
+                self.assertEqual(report, json.loads((out / 'protocol-experiment.json').read_text()))
+                self.assertEqual(report['data_kind'], 'low_security_experiment')
+                self.assertEqual(report['context_mode'], mode)
+                self.assertEqual(report['cache'], 'uncontrolled')
+                self.assertFalse(report['cache_policy']['generator_result_cache'])
+                self.assertIn('reuse_enabled', report['cache_policy'])
+                self.assertEqual(report['cache_policy']['reuse_enabled'], mode == 'retained')
+                self.assertEqual(report['cache_policy']['os_cache'], 'uncontrolled')
+                self.assertEqual(report['security_status'], 'not_established_low_security_experiment')
+                self.assertEqual(report['profile'], 'low-security-test')
+                self.assertGreater(report['ledger_init_ns'], 0)
+                self.assertFalse(report['formal_measurement'])
+                self.assertFalse(report['publication_eligible'])
+                self.assertFalse(report['certify_real_time'])
+                self.assertEqual(len(report['epochs']), 2)
+                self.assertEqual([row['first_context_decode'] for row in report['epochs']],
+                                 [True, mode == 'decode'])
+                self.assertEqual(report['parameters'], dataclasses.asdict(self.parameters))
+                self.assertEqual(len({r['seed_hex'] for r in report['epochs']}), 2)
+                for row in report['epochs']:
+                    self.assertEqual(row['profile'], 'low-security-test')
+                    self.assertEqual(row['parameters'], report['parameters'])
+                    self.assertEqual(row['parameter_audit'], report['parameter_audit'])
+                    self.assertEqual(row['hardware'], report['hardware'])
+                    self.assertEqual(row['external_provider'], 'TEST_ONLY_SIMULATED_PROVIDER')
+                    self.assertTrue(row['accepted'] and row['admitted'])
+                    self.assertGreater(row['verifier_init_ns'], 0)
+                    self.assertGreater(row['verify_call_ns'], 0)
+                    self.assertEqual(row['verify_ns'], row['verifier_init_ns'] + row['verify_call_ns'])
+                    self.assertEqual(sum(row['stages_ns'].values()), row['verify_ns'])
+                    self.assertEqual(row['stages_ns']['verifier_init'], row['verifier_init_ns'])
+                    self.assertGreater(row['stages_ns']['opening'], 0)
+                    self.assertGreater(row['stages_ns']['admission'], 0)
+                    self.assertEqual(row['diagnostics']['same_epoch_replay']['reason'], 'replayed_epoch')
+                    self.assertEqual(row['context_mode'], mode)
+                    self.assertEqual(row['cache_policy']['registration_reused'],
+                                     mode == 'retained' and not row['first_context_decode'])
+                    source_files = row['provenance']['source_files_sha256']
+                    for name in ('arithmetic', 'resources', 'cli'):
+                        self.assertIn('damascus_a/' + name + '.py', source_files)
+                variable = sum(r['prove_ns'] + r['verify_ns'] for r in report['epochs'])
+                self.assertEqual(report['setup_excluded_cost']['total_ns'], variable)
+                self.assertEqual(report['fresh_epoch_cost']['total_ns'], report['setup_once_ns'] + variable)
+                with sqlite3.connect(out / 'admission.sqlite3') as connection:
+                    self.assertEqual(connection.execute('SELECT count(*) FROM damascus_admissions_v1').fetchone()[0], 2)
+                with (out / 'protocol-experiment.csv').open(newline='') as stream:
+                    csv_rows = list(csv.DictReader(stream))
+                self.assertEqual(len(csv_rows), len(report['epochs']))
+                jsonl_rows = [json.loads(line) for line in (out / 'epochs.jsonl').read_text().splitlines()]
+                self.assertEqual(jsonl_rows, report['epochs'])
+                for csv_row, row in zip(csv_rows, report['epochs']):
+                    self.assertEqual(csv_row['context_mode'], mode)
+                    self.assertEqual(int(csv_row['verify_call_ns']), row['verify_call_ns'])
+                    self.assertEqual(json.loads(csv_row['parameters_json']), row['parameters'])
+                    self.assertEqual(json.loads(csv_row['parameter_audit_json']), row['parameter_audit'])
+                    self.assertEqual(json.loads(csv_row['row_json']), row)
+                with self.assertRaises(ValueError):
+                    aggregate(report['epochs'], 'A1', publication=True)
+            for relative in ('public-parameters.bin', 'registration.bin', 'epochs/0001/context.bin',
+                             'epochs/0001/proof.bin', 'epochs/0002/context.bin', 'epochs/0002/proof.bin'):
+                self.assertEqual((Path(directory) / 'decode' / relative).read_bytes(),
+                                 (Path(directory) / 'retained' / relative).read_bytes())
+
+    def test_context_modes_use_distinct_verifier_state_without_skipping_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for mode in ('decode', 'retained'):
+                contexts = []
+                prove_contexts = []
+                original_verify, original_prove = protocol.verify, protocol.prove_epoch
+                def record_verify(raw, ctx, **kwargs):
+                    result = original_verify(raw, ctx, **kwargs)
+                    if result.admitted:
+                        contexts.append(ctx)
+                    return result
+                def record_prove(ctx, *args, **kwargs):
+                    prove_contexts.append(ctx)
+                    return original_prove(ctx, *args, **kwargs)
+                with patch('damascus_a.protocol_run.protocol.verify', side_effect=record_verify), \
+                     patch('damascus_a.protocol_run.protocol.prove_epoch', side_effect=record_prove):
+                    self.run_experiment(Path(directory) / mode, parameters=self.parameters,
+                        profile='state-lifetime-test', data=b'a', epochs=2, test_seed=9,
+                        experimental_only=True, context_mode=mode)
+                self.assertEqual(len(contexts), 2)
+                for verifier_ctx, prover_ctx in zip(contexts, prove_contexts):
+                    self.assertEqual(verifier_ctx, prover_ctx)
+                    self.assertIsNot(verifier_ctx, prover_ctx)
+                    self.assertIsNot(verifier_ctx.registration, prover_ctx.registration)
+                if mode == 'retained':
+                    self.assertIs(contexts[0].registration, contexts[1].registration)
+                else:
+                    self.assertIsNot(contexts[0].registration, contexts[1].registration)
+
+    def test_actual_backend_context_and_explicit_gpu_fallback(self):
+        from damascus_a.backend import get_arithmetic_backend
+        with tempfile.TemporaryDirectory() as directory:
+            seen = []
+            original_setup = protocol.setup
+            def observe(*args, **kwargs):
+                seen.append(get_arithmetic_backend())
+                return original_setup(*args, **kwargs)
+            with patch('damascus_a.protocol_run.protocol.setup', side_effect=observe):
+                fused = self.run_experiment(Path(directory) / 'fused', parameters=self.parameters,
+                    profile='backend-test', data=b'a', epochs=1, test_seed=8,
+                    experimental_only=True, backend='cpu-fused')
+            self.assertIsNotNone(seen[0])
+            self.assertIsNone(get_arithmetic_backend())
+            self.assertEqual(fused['backend']['actual'], 'cpu-fused')
+            fallback = self.run_experiment(Path(directory) / 'fallback', parameters=self.parameters,
+                profile='backend-test', data=b'a', epochs=1, test_seed=8, experimental_only=True,
+                backend='gpu', allow_cpu_fallback=True)
+            self.assertEqual(fallback['backend']['actual'], 'cpu-reference')
+            self.assertTrue(fallback['backend']['fallback'])
+            self.assertIsNone(fallback['resources']['peak_vram_bytes'])
+            with self.assertRaises(BackendUnavailable):
+                self.run_experiment(Path(directory) / 'no-gpu', parameters=self.parameters,
+                    profile='backend-test', data=b'a', experimental_only=True, backend='gpu')
+            self.assertFalse((Path(directory) / 'no-gpu').exists())
 
 
 if __name__ == '__main__':

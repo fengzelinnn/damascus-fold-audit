@@ -8,6 +8,16 @@ class BackendTests(unittest.TestCase):
         r=select_backend('cpu-reference')
         self.assertEqual(r.actual,'cpu-reference'); self.assertFalse(r.fallback)
 
+    def test_fused_cpu_selection_is_explicit(self):
+        try:
+            result = select_backend('cpu-fused')
+        except ValueError as error:
+            self.fail(f'the explicit fused CPU backend is missing: {error}')
+        self.assertEqual(result.requested, 'cpu-fused')
+        self.assertEqual(result.actual, 'cpu-fused')
+        self.assertFalse(result.fallback)
+        self.assertIsNone(result.reason)
+
     def test_gpu_fails_closed_or_records_explicit_fallback(self):
         with self.assertRaises(BackendUnavailable): select_backend('gpu')
         r=select_backend('gpu',allow_cpu_fallback=True)
